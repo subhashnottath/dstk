@@ -3,75 +3,55 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/anujga/dstk/pkg/bdb"
 	badger "github.com/dgraph-io/badger/v2"
-	"os"
 	"time"
 )
 
-func counterMerge(old, incValue []byte) []byte {
-	oldInt, _ := binary.Varint(old)
-	incInt, _ := binary.Varint(incValue)
-	res := make([]byte, 64)
-	binary.PutVarint(res, oldInt+incInt)
-	return res
-}
-
 type PersistentCounter struct {
-	db *badger.DB
+	db *bdb.Wrapper
 }
 
 func (pc *PersistentCounter) Get(key string) (int64, error) {
-	var res []byte
-	err := pc.db.View(func(txn *badger.Txn) error {
-		keyBytes := []byte(key)
-		item, err := txn.Get(keyBytes)
-		if err != nil {
-			return err
-		}
-		res, err = item.ValueCopy(nil)
-		return err
-	})
-	if err != nil {
+	if res, err := pc.db.Get([]byte(key)); err == nil {
+		val, _ := binary.Varint(res)
+		return val, nil
+	} else {
 		return 0, err
 	}
-	val, _ := binary.Varint(res)
-	return val, nil
 }
 
-func (pc *PersistentCounter) Inc(key string, value int64) error {
+func (pc *PersistentCounter) Inc(key string, value int64, ttlSeconds float64) error {
 	incValBytes := make([]byte, 64)
 	binary.PutVarint(incValBytes, value)
-	mergeOp := pc.db.GetMergeOperator([]byte(key), counterMerge, time.Millisecond*1)
-	err := mergeOp.Add(incValBytes)
-	mergeOp.Stop()
-	return err
+	keyBytes := []byte(key)
+	return pc.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyBytes)
+		exValue := int64(0)
+		if err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err == nil {
+			if existingBytes, err := item.ValueCopy(nil); err != nil {
+				return err
+			} else {
+				var n int
+				if exValue, n = binary.Varint(existingBytes); n <= 0 {
+					return fmt.Errorf("invalid data for %s", key)
+				}
+			}
+		}
+		res := make([]byte, 64)
+		binary.PutVarint(res, value+exValue)
+		entry := badger.NewEntry(keyBytes, res).WithTTL(time.Second * time.Duration(ttlSeconds))
+		return txn.SetEntry(entry)
+	})
+}
+
+func (pc *PersistentCounter) Remove(key string) error {
+	return pc.db.Remove([]byte(key))
 }
 
 func (pc *PersistentCounter) Close() error {
 	return pc.db.Close()
 }
-
-func NewCounter(dbPath string) (*PersistentCounter, error) {
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		return nil, err
-	}
-	db, err := badger.Open(badger.DefaultOptions(dbPath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create db %s", err)
-	}
-	return &PersistentCounter{db: db}, nil
-}
-
-//func main() {
-//	pc, err := NewCounter("/var/tmp/test-db")
-//	fmt.Println(err)
-//	defer pc.Close()
-//	val, err := pc.Get("foo")
-//	fmt.Println(val)
-//	err = pc.Inc("foo", 10)
-//	val, err = pc.Get("foo")
-//	fmt.Println(val)
-//	err = pc.Inc("foo", 10)
-//	val, err = pc.Get("foo")
-//	fmt.Println(val)
-//}

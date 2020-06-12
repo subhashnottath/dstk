@@ -1,22 +1,23 @@
 package ss
 
-import dstk "github.com/anujga/dstk/pkg/api/proto"
-
-type KeyT []byte
+import (
+	dstk "github.com/anujga/dstk/pkg/api/proto"
+	"github.com/anujga/dstk/pkg/core"
+)
 
 type Msg interface {
 	ReadOnly() bool
-	Key() KeyT
+	Key() core.KeyT
 	ResponseChannel() chan interface{}
 }
 
-type Consumer interface {
+type PartHandler interface {
 	Process(msg Msg) bool
 	//Meta() *dstk.Partition
 }
 
 type ConsumerFactory interface {
-	Make(p *dstk.Partition) (Consumer, int, error)
+	Make(p *dstk.Partition) (PartHandler, int, error)
 }
 
 type Router interface {
@@ -24,6 +25,6 @@ type Router interface {
 }
 
 type PartMgr interface {
-	Find(key KeyT) *PartItem
+	Find(key core.KeyT) *PartRange
 	Add(p *dstk.Partition) error
 }

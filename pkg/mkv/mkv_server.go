@@ -8,6 +8,8 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"io/ioutil"
 	"net"
@@ -44,14 +46,14 @@ func MakeServer() (pb.MkvServer, error) {
 	return &s, nil
 }
 
-func (s *mkvServer) AddPart(ctx context.Context, args *pb.AddParReq) (*pb.Ex, error) {
+func (s *mkvServer) AddPart(ctx context.Context, args *pb.AddParReq) error {
 	uri := args.GetUri()
 	if !strings.HasPrefix(uri, "file://") {
 		s.slog.Errorw("Unkown file prefix",
 			"allowed", "file://",
 			"found", uri,
 		)
-		return &pb.Ex{Id: pb.Ex_NOT_IMPLEMENTED}, nil
+		return status.Newf(codes.Unimplemented, "Url should have a `file://` prefix. found %s", uri).Err()
 	}
 
 	filename := strings.TrimPrefix(uri, "file://")
@@ -65,7 +67,7 @@ func (s *mkvServer) AddPart(ctx context.Context, args *pb.AddParReq) (*pb.Ex, er
 		s.slog.Errorw("Could not open patition file",
 			"uri", uri,
 			"err", err)
-		return &pb.Ex{Id: pb.Ex_INVALID_ARGUMENT}, err
+		return err
 	}
 
 	p := &pb.MkvPartition{}
@@ -74,24 +76,14 @@ func (s *mkvServer) AddPart(ctx context.Context, args *pb.AddParReq) (*pb.Ex, er
 			"uri", uri,
 			"err", err)
 
-		return &pb.Ex{Id: pb.Ex_INVALID_ARGUMENT}, err
+		return err
 	}
 
 	id := p.GetId()
-	s.mu.Lock()
-
-	{
-		if _, ok := s.partitions[id]; ok {
-			s.slog.Errorw("Partition already exists")
-			return &pb.Ex{Id: pb.Ex_INVALID_ARGUMENT, Msg: "Partition already exists"}, err
-		}
-
-		//note: partition is already added assuming there cannot be any failure
-		//subsequently
-		s.partitions[id] = uri
+	err = s.insertPartition(id, uri)
+	if err != nil {
+		return err
 	}
-
-	s.mu.Unlock()
 
 	i := 0
 	var e *pb.MkvPartition_Entry
@@ -105,7 +97,26 @@ func (s *mkvServer) AddPart(ctx context.Context, args *pb.AddParReq) (*pb.Ex, er
 	}
 
 	s.slog.Infow("file read successfully", "uri", uri, "count", i+1)
-	return core.ExOK, nil
+	return nil
+}
+
+func (s *mkvServer) insertPartition(id int64, uri string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if oldPart, ok := s.partitions[id]; ok {
+		s.slog.Errorw("Partition already exists")
+		return core.ErrInfo(
+			codes.InvalidArgument,
+			"Partition already exists",
+			"old", oldPart).Err()
+	}
+
+	//note: partition is already added assuming there cannot be any failure
+	//subsequently
+	s.partitions[id] = uri
+
+	return nil
 }
 
 func (s *mkvServer) Get(ctx context.Context, args *pb.GetReq) (*pb.GetRes, error) {
@@ -114,16 +125,16 @@ func (s *mkvServer) Get(ctx context.Context, args *pb.GetReq) (*pb.GetRes, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.partitions[p]; !ok {
-		return &pb.GetRes{Ex: &pb.Ex{Id: pb.Ex_BAD_PARTITION}}, nil
+		return nil, core.ErrInfo(codes.Unavailable, "Bad Partition",
+			"resolved", string(p)).Err()
 	}
 
 	val, ok := s.data[k]
 	if !ok {
-		return &pb.GetRes{Ex: &pb.Ex{Id: pb.Ex_NOT_FOUND}}, nil
+		return nil, status.New(codes.NotFound, "Not found").Err()
 	}
 
 	return &pb.GetRes{
-		Ex:          core.ExOK,
 		PartitionId: val.partitionId,
 		Payload:     val.payload,
 	}, nil
